@@ -2,6 +2,7 @@
 epochs                          = 10000
 batch_size                      = 128
 learning_rate                   = 0.0001
+learning_rate_decay             = 0.999
 #####################################################################################
 load_checkpoint_name            = ""
 save_checkpoint_name            = "WAVENET"

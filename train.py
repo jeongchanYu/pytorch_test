@@ -1,4 +1,4 @@
-import neptune.new as neptune
+import neptune_function
 from api_key import *
 from config import *
 import util
@@ -9,22 +9,9 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 import model
 
-# neptune preset
-custom_run_id_len = len(f'{os.getlogin()}_{model_name}')
-if custom_run_id_len>=30:
-    util.raise_error(f'model_name is too long. You must delete {custom_run_id_len-29} characters.')
-
-neptune_run = neptune.init(
-    project="csp-lab/AEC",
-    api_token=api_key['yjc'],
-    source_files=['train.py', 'model.py', 'config.py', 'loss_function.py'],
-    custom_run_id=f'{os.getlogin()}_{model_name}',
-    name=model_name,
-    tags=[os.getlogin(), model_name],
-    flush_period=10,
-    capture_stdout=False,
-    capture_stderr=False
-)
+# neptune init
+neptune = neptune_function.Neptune(project_name='csp-lab/AEC', model_name=model_name, api_key=api_key['yjc'],
+                          file_names=['train.py', 'model.py', 'config.py', 'loss_function.py'])
 
 # train var preset
 torch.manual_seed(seed)
@@ -47,48 +34,44 @@ def train(rank):
     wavenet = model.Wavenet(dilation).to(device)
     optimizer = torch.optim.AdamW(wavenet.parameters(), learning_rate)
 
+    # load model
     if rank == 0:
-        # LOAD MODEL
-        pass
+        if load_checkpoint_name != "":
+            saved_epoch = int(load_checkpoint_name.split('_')[-1])
+            load_checkpoint_path = os.path.join('./checkpoint', f"{load_checkpoint_name}.pth")
+            checkpoint = torch.load(load_checkpoint_path, map_location=device)
+            wavenet.load_state_dict(checkpoint['wavenet'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+        else:
+            saved_epoch = 0
 
+    # learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=learning_rate_decay, last_epoch=saved_epoch)
+
+    # neptune loss init
+    neptune.loss_init(['mae_loss'], saved_epoch, 'train')
+
+    # multi gpu model upload
     if num_gpus > 1:
-        generator = DistributedDataParallel(wavenet, device_ids=[rank]).to(device)
+        wavenet = DistributedDataParallel(wavenet, device_ids=[rank]).to(device)
 
-
-    scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=h.lr_decay, last_epoch=last_epoch)
-
+    # dataloader
     training_filelist, validation_filelist = get_dataset_filelist(a)
 
     trainset = MelDataset(training_filelist, h.segment_size, h.n_fft, h.num_mels,
                           h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, n_cache_reuse=0,
                           shuffle=False if h.num_gpus > 1 else True, fmax_loss=h.fmax_for_loss, device=device,
                           fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir)
-
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
-
     train_loader = DataLoader(trainset, num_workers=h.num_workers, shuffle=False,
                               sampler=train_sampler,
                               batch_size=h.batch_size,
                               pin_memory=True,
                               drop_last=True)
 
-    if rank == 0:
-        validset = MelDataset(validation_filelist, h.segment_size, h.n_fft, h.num_mels,
-                              h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, False, False, n_cache_reuse=0,
-                              fmax_loss=h.fmax_for_loss, device=device, fine_tuning=a.fine_tuning,
-                              base_mels_path=a.input_mels_dir)
-        validation_loader = DataLoader(validset, num_workers=1, shuffle=False,
-                                       sampler=None,
-                                       batch_size=1,
-                                       pin_memory=True,
-                                       drop_last=True)
-
-        sw = SummaryWriter(os.path.join(a.checkpoint_path, 'logs'))
-
-    generator.train()
-    mpd.train()
-    msd.train()
-    for epoch in range(max(0, last_epoch), a.training_epochs):
+    # run
+    wavenet.train()
+    for epoch in range(saved_epoch + 1, saved_epoch + epochs + 1):
         if rank == 0:
             start = time.time()
             print("Epoch: {}".format(epoch + 1))
@@ -109,23 +92,7 @@ def train(rank):
             y_g_hat_mel = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate, h.hop_size, h.win_size,
                                           h.fmin, h.fmax_for_loss)
 
-            optim_d.zero_grad()
-
-            # MPD
-            y_df_hat_r, y_df_hat_g, _, _ = mpd(y, y_g_hat.detach())
-            loss_disc_f, losses_disc_f_r, losses_disc_f_g = discriminator_loss(y_df_hat_r, y_df_hat_g)
-
-            # MSD
-            y_ds_hat_r, y_ds_hat_g, _, _ = msd(y, y_g_hat.detach())
-            loss_disc_s, losses_disc_s_r, losses_disc_s_g = discriminator_loss(y_ds_hat_r, y_ds_hat_g)
-
-            loss_disc_all = loss_disc_s + loss_disc_f
-
-            loss_disc_all.backward()
-            optim_d.step()
-
-            # Generator
-            optim_g.zero_grad()
+            optimizer.zero_grad()
 
             # L1 Mel-Spectrogram Loss
             loss_mel = F.l1_loss(y_mel, y_g_hat_mel) * 45
@@ -139,7 +106,7 @@ def train(rank):
             loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + loss_mel
 
             loss_gen_all.backward()
-            optim_g.step()
+            optimizer.step()
 
             if rank == 0:
                 # STDOUT logging
