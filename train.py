@@ -1,13 +1,18 @@
+import os
+import time
+import datetime
+import math
 import neptune_function
 from api_key import *
 from config import *
+import model
+import dataset
 import util
-import os
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
-import model
+from torch.utils.data import DistributedSampler, DataLoader
 
 # neptune init
 neptune = neptune_function.Neptune(project_name='csp-lab/AEC', model_name=model_name, api_key=api_key['yjc'],
@@ -56,16 +61,12 @@ def train(rank):
         wavenet = DistributedDataParallel(wavenet, device_ids=[rank]).to(device)
 
     # dataloader
-    training_filelist, validation_filelist = get_dataset_filelist(a)
-
-    trainset = MelDataset(training_filelist, h.segment_size, h.n_fft, h.num_mels,
-                          h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, n_cache_reuse=0,
-                          shuffle=False if h.num_gpus > 1 else True, fmax_loss=h.fmax_for_loss, device=device,
-                          fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir)
-    train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
-    train_loader = DataLoader(trainset, num_workers=h.num_workers, shuffle=False,
+    frame_size = past_size + present_size + future_size
+    train_set = dataset.AudioDataset([train_orig_path, train_noisy_path], sampling_rate, frame_size, shift_size, input_window)
+    train_sampler = DistributedSampler(train_set) if num_gpus > 1 else None
+    train_loader = DataLoader(train_set, num_workers=num_gpus*4, shuffle=True,
                               sampler=train_sampler,
-                              batch_size=h.batch_size,
+                              batch_size=batch_per_gpu,
                               pin_memory=True,
                               drop_last=True)
 
@@ -74,23 +75,26 @@ def train(rank):
     for epoch in range(saved_epoch + 1, saved_epoch + epochs + 1):
         if rank == 0:
             start = time.time()
-            print("Epoch: {}".format(epoch + 1))
+            now_time = datetime.datetime.now().strftime("%Y-%m-%d/%H:%M:%S")
+            num_of_iteration = math.ceil(train_set.number_of_frame/batch_size)
+            train_mae_loss = 0
 
-        if h.num_gpus > 1:
+        if num_gpus > 1:
             train_sampler.set_epoch(epoch)
 
         for i, batch in enumerate(train_loader):
             if rank == 0:
-                start_b = time.time()
-            x, y, _, y_mel = batch
+                print(f"\r({now_time})", end=" ")
+                print(util.change_font_color('bright cyan', 'Train:'), end=" ")
+                print(util.change_font_color('yellow', 'epoch'), util.change_font_color('bright yellow', f"{epoch}/{saved_epoch + epochs},"), end=" ")
+                print(util.change_font_color('yellow', 'iter'), util.change_font_color('bright yellow', f"{i + 1}/{num_of_iteration}"), end=" ")
+
+            orig, noisy = batch
             x = torch.autograd.Variable(x.to(device, non_blocking=True))
             y = torch.autograd.Variable(y.to(device, non_blocking=True))
-            y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=True))
             y = y.unsqueeze(1)
 
             y_g_hat = generator(x)
-            y_g_hat_mel = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate, h.hop_size, h.win_size,
-                                          h.fmin, h.fmax_for_loss)
 
             optimizer.zero_grad()
 
@@ -136,37 +140,6 @@ def train(rank):
                     sw.add_scalar("training/gen_loss_total", loss_gen_all, steps)
                     sw.add_scalar("training/mel_spec_error", mel_error, steps)
 
-                # Validation
-                if steps % a.validation_interval == 0:  # and steps != 0:
-                    generator.eval()
-                    torch.cuda.empty_cache()
-                    val_err_tot = 0
-                    with torch.no_grad():
-                        for j, batch in enumerate(validation_loader):
-                            x, y, _, y_mel = batch
-                            y_g_hat = generator(x.to(device))
-                            y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=True))
-                            y_g_hat_mel = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate,
-                                                          h.hop_size, h.win_size,
-                                                          h.fmin, h.fmax_for_loss)
-                            val_err_tot += F.l1_loss(y_mel, y_g_hat_mel).item()
-
-                            if j <= 4:
-                                if steps == 0:
-                                    sw.add_audio('gt/y_{}'.format(j), y[0], steps, h.sampling_rate)
-                                    sw.add_figure('gt/y_spec_{}'.format(j), plot_spectrogram(x[0]), steps)
-
-                                sw.add_audio('generated/y_hat_{}'.format(j), y_g_hat[0], steps, h.sampling_rate)
-                                y_hat_spec = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels,
-                                                             h.sampling_rate, h.hop_size, h.win_size,
-                                                             h.fmin, h.fmax)
-                                sw.add_figure('generated/y_hat_spec_{}'.format(j),
-                                              plot_spectrogram(y_hat_spec.squeeze(0).cpu().numpy()), steps)
-
-                        val_err = val_err_tot / (j + 1)
-                        sw.add_scalar("validation/mel_spec_error", val_err, steps)
-
-                    generator.train()
 
             steps += 1
 
