@@ -16,7 +16,7 @@ class ResidualBlock(torch.nn.Module):
         self.conv_skip_out = Conv1d(channel, channel, 1, padding='same')
 
     def forward(self, x):
-        gated = F.sigmoid(self.conv_gated_sigmoid) * F.tanh(self.conv_gated_tanh(x))
+        gated = F.sigmoid(self.conv_gated_sigmoid(x)) * F.tanh(self.conv_gated_tanh(x))
         res_out = self.conv_residual(gated) + x
         skip_out = self.conv_skip_out(gated)
         return res_out, skip_out

@@ -12,7 +12,6 @@ class AudioDataset(Dataset):
         self.shift_size = shift_size
         self.window = util.window(window_type, self.frame_size, dtype)
 
-        print("DATASET INITIATING!")
         # single audio dataset
         if isinstance(audio_file_path, str):
             all_audio_path_list = [util.read_path_list(audio_file_path, extension=extension)]

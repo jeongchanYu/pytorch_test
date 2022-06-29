@@ -15,26 +15,18 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DistributedSampler, DataLoader
 
-# neptune init
-neptune = neptune_function.Neptune(project_name=project_name, model_name=model_name, api_key=api_key[api_key_name], file_names=backup_file_list)
 
-# train var preset
-torch.manual_seed(seed)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(seed)
-    num_gpus = torch.cuda.device_count()
-    batch_per_gpu = batch_size // num_gpus
-    print('Batch size per GPU :', batch_per_gpu)
-else:
-    num_gpus = 0
-
-
-def train(rank):
+def train(rank, params):
+    num_gpus, batch_per_gpu = params
     if num_gpus > 1:
-        dist.init_process_group(backend='nccl', init_method='tcp://127.0.0.1:FREEPORT', world_size=num_gpus, rank=rank)
+        dist.init_process_group(backend='nccl', init_method='tcp://127.0.0.1:54321', world_size=num_gpus, rank=rank)
 
-    torch.cuda.manual_seed(seed)
-    device = torch.device('cuda:{:d}'.format(rank))
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        device = torch.device('cuda:{:d}'.format(rank))
+    else:
+        device = torch.device('cpu')
 
     wavenet = model.Wavenet(dilation).to(device)
     optimizer = torch.optim.AdamW(wavenet.parameters(), learning_rate)
@@ -47,10 +39,11 @@ def train(rank):
         wavenet.load_state_dict(checkpoint['wavenet'])
         optimizer.load_state_dict(checkpoint['optimizer'])
     else:
-        saved_epoch = 0
+        saved_epoch = -1
 
     if rank == 0:
         # neptune loss init
+        neptune = neptune_function.Neptune(project_name=project_name, model_name=model_name, api_key=api_key[api_key_name], file_names=backup_file_list)
         neptune.loss_init(['mae_loss'], saved_epoch, 'train')
 
     # learning rate scheduler
@@ -64,7 +57,7 @@ def train(rank):
     frame_size = past_size + present_size + future_size
     train_set = dataset.AudioDataset([train_orig_path, train_noisy_path], sampling_rate, frame_size, shift_size, input_window)
     train_sampler = DistributedSampler(train_set) if num_gpus > 1 else None
-    train_loader = DataLoader(train_set, num_workers=num_gpus*4, shuffle=True, sampler=train_sampler, batch_size=batch_per_gpu, pin_memory=True, drop_last=True)
+    train_loader = DataLoader(train_set, num_workers=num_gpus*4, shuffle=False if num_gpus > 1 else True, sampler=train_sampler, batch_size=batch_per_gpu, pin_memory=True, drop_last=True)
 
     # run
     wavenet.train()
@@ -85,7 +78,7 @@ def train(rank):
                 print(util.change_font_color('yellow', 'epoch'), util.change_font_color('bright yellow', f"{epoch}/{saved_epoch + epochs},"), end=" ")
                 print(util.change_font_color('yellow', 'iter'), util.change_font_color('bright yellow', f"{i + 1}/{num_of_iteration}"), end=" ")
 
-            orig, noisy = batch
+            index, orig, noisy = batch
             orig = orig.to(device, non_blocking=True)
             noisy = noisy.to(device, non_blocking=True)
             orig = orig.unsqueeze(1)
@@ -112,7 +105,7 @@ def train(rank):
             neptune.log('mae_loss', train_mae_loss, epoch)
 
             # checkpoint save
-            if epoch % save_checkpoint_period == 0 or epoch == 1:
+            if epoch % save_checkpoint_period == 0 or epoch == 0:
                 save_checkpoint_path = f"./checkpoint/{save_checkpoint_name}_{epoch}.pth"
                 os.makedirs(save_checkpoint_path, exist_ok=True)
                 checkpoint = {'wavenet': wavenet.state_dict(), 'optimizer': optimizer.state_dict()}
@@ -125,10 +118,22 @@ def train(rank):
 
         scheduler.step()
 
-# train
-if num_gpus > 1:
-    mp.spawn(train, nprocs=num_gpus)
-else:
-    train(0)
+    neptune.stop()
 
-neptune.stop()
+
+if __name__ == '__main__':
+    # train var preset
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        num_gpus = torch.cuda.device_count()
+        batch_per_gpu = batch_size // num_gpus
+        print('Batch size per GPU :', batch_per_gpu)
+    else:
+        num_gpus = 0
+
+    # run
+    if num_gpus > 1:
+        mp.spawn(train, nprocs=num_gpus, args=([num_gpus, batch_per_gpu],))
+    else:
+        train(0)
