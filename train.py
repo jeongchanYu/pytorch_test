@@ -39,7 +39,7 @@ def train(rank, params):
         wavenet.load_state_dict(checkpoint['wavenet'])
         optimizer.load_state_dict(checkpoint['optimizer'])
     else:
-        saved_epoch = -1
+        saved_epoch = 0
 
     if rank == 0:
         # neptune loss init
@@ -47,7 +47,7 @@ def train(rank, params):
         neptune.loss_init(['mae_loss'], saved_epoch, 'train')
 
     # learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=learning_rate_decay, last_epoch=saved_epoch)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=learning_rate_decay, last_epoch=saved_epoch-1)
 
     # multi gpu model upload
     if num_gpus > 1:
@@ -90,7 +90,6 @@ def train(rank, params):
             orig_pred = wavenet(noisy)
             noise_pred = noisy-orig_pred
 
-            # L1 Mel-Spectrogram Loss
             loss = (loss_function.l1_loss(orig, orig_pred) + loss_function.l1_loss(noise, noise_pred)) / 2.0 / batch_size
 
             loss.backward()
@@ -105,9 +104,9 @@ def train(rank, params):
             neptune.log('mae_loss', train_mae_loss, epoch)
 
             # checkpoint save
-            if epoch % save_checkpoint_period == 0 or epoch == 0:
+            if epoch % save_checkpoint_period == 0 or epoch == 1:
                 save_checkpoint_path = f"./checkpoint/{save_checkpoint_name}_{epoch}.pth"
-                os.makedirs(save_checkpoint_path, exist_ok=True)
+                os.makedirs(os.path.dirname(save_checkpoint_path), exist_ok=True)
                 checkpoint = {'wavenet': wavenet.state_dict(), 'optimizer': optimizer.state_dict()}
                 torch.save(checkpoint, save_checkpoint_path)
 

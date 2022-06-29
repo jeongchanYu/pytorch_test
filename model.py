@@ -3,22 +3,26 @@ import torch.nn.functional as F
 import torch.nn as nn
 import torch.nn.init as init
 from torch.nn import Module, ModuleList, Conv1d, ConvTranspose1d
-from config import *
 
 
 class ResidualBlock(torch.nn.Module):
-    def __init__(self, dilation, channel=128):
+    def __init__(self, dilation, channel=128, residual=True):
         super(ResidualBlock, self).__init__()
+        self.residual = residual
 
         self.conv_gated_sigmoid = Conv1d(channel, channel, 3, padding='same', dilation=dilation)
         self.conv_gated_tanh = Conv1d(channel, channel, 3, padding='same', dilation=dilation)
-        self.conv_residual = Conv1d(channel, channel, 1, padding='same')
         self.conv_skip_out = Conv1d(channel, channel, 1, padding='same')
+        if self.residual:
+            self.conv_residual = Conv1d(channel, channel, 1, padding='same')
 
     def forward(self, x):
-        gated = F.sigmoid(self.conv_gated_sigmoid(x)) * F.tanh(self.conv_gated_tanh(x))
-        res_out = self.conv_residual(gated) + x
+        gated = torch.sigmoid(self.conv_gated_sigmoid(x)) * torch.tanh(self.conv_gated_tanh(x))
         skip_out = self.conv_skip_out(gated)
+        if self.residual:
+            res_out = self.conv_residual(gated) + x
+        else:
+            res_out = skip_out
         return res_out, skip_out
 
     def initialize_weights(self):
@@ -37,7 +41,9 @@ class Wavenet(torch.nn.Module):
         super(Wavenet, self).__init__()
 
         self.conv_input = Conv1d(1, channel, 1, padding='same')
-        self.residual_block = nn.ModuleList([ResidualBlock(d, channel) for d in dilation])
+        residual_block_list = [ResidualBlock(d, channel) for d in dilation[:-1]]
+        residual_block_list.append(ResidualBlock(dilation[-1], channel, False))
+        self.residual_block = nn.ModuleList(residual_block_list)
         self.conv_output1 = Conv1d(channel, 2048, 3, padding='same')
         self.conv_output2 = Conv1d(2048, 256, 3, padding='same')
         self.conv_output3 = Conv1d(256, 1, 1, padding='same')
@@ -54,7 +60,7 @@ class Wavenet(torch.nn.Module):
         skip_out = F.leaky_relu(skip_out, 0.1)
         output = F.leaky_relu(self.conv_output1(skip_out), 0.1)
         output = F.leaky_relu(self.conv_output2(output), 0.1)
-        output = F.tanh(self.conv_output3(output))
+        output = torch.tanh(self.conv_output3(output))
         return output
 
     def initialize_weights(self):

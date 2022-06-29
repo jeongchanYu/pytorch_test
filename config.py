@@ -1,6 +1,6 @@
 ##### LEARNING_PARAMETER #######################################################################
 epochs                          = 10000
-batch_size                      = 128
+batch_size                      = 32
 learning_rate                   = 0.0001
 learning_rate_decay             = 0.999
 seed                            = 1234
@@ -24,6 +24,6 @@ test_noisy_path                 = "/home/server7/DATASET/woman_4noise/noisy"
 test_orig_path                  = "/home/server7/DATASET/woman_4noise/orig"
 ##### NEPTUNE_SETTING ##########################################################################
 project_name                    = 'csp-lab/AEC'
-model_name                      = "WAVENET"
+model_name                      = "TORCH_TEST"
 api_key_name                    = 'yjc'
 backup_file_list                = ['train.py', 'model.py', 'config.py', 'loss_function.py']
