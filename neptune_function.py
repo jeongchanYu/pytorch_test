@@ -41,3 +41,6 @@ class Neptune:
 
     def log(self, loss_name, loss, epoch, category='train'):
         self.neptune_run[f'loss/{category}/{loss_name}'].log(loss, step=epoch)
+
+    def stop(self):
+        self.neptune_run.stop()

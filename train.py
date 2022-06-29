@@ -2,6 +2,7 @@ import os
 import time
 import datetime
 import math
+import loss_function
 import neptune_function
 from api_key import *
 from config import *
@@ -15,8 +16,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DistributedSampler, DataLoader
 
 # neptune init
-neptune = neptune_function.Neptune(project_name='csp-lab/AEC', model_name=model_name, api_key=api_key['yjc'],
-                          file_names=['train.py', 'model.py', 'config.py', 'loss_function.py'])
+neptune = neptune_function.Neptune(project_name=project_name, model_name=model_name, api_key=api_key[api_key_name], file_names=backup_file_list)
 
 # train var preset
 torch.manual_seed(seed)
@@ -40,21 +40,21 @@ def train(rank):
     optimizer = torch.optim.AdamW(wavenet.parameters(), learning_rate)
 
     # load model
+    if load_checkpoint_name != "":
+        saved_epoch = int(load_checkpoint_name.split('_')[-1])
+        load_checkpoint_path = os.path.join('./checkpoint', f"{load_checkpoint_name}.pth")
+        checkpoint = torch.load(load_checkpoint_path, map_location=device)
+        wavenet.load_state_dict(checkpoint['wavenet'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+    else:
+        saved_epoch = 0
+
     if rank == 0:
-        if load_checkpoint_name != "":
-            saved_epoch = int(load_checkpoint_name.split('_')[-1])
-            load_checkpoint_path = os.path.join('./checkpoint', f"{load_checkpoint_name}.pth")
-            checkpoint = torch.load(load_checkpoint_path, map_location=device)
-            wavenet.load_state_dict(checkpoint['wavenet'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-        else:
-            saved_epoch = 0
+        # neptune loss init
+        neptune.loss_init(['mae_loss'], saved_epoch, 'train')
 
     # learning rate scheduler
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=learning_rate_decay, last_epoch=saved_epoch)
-
-    # neptune loss init
-    neptune.loss_init(['mae_loss'], saved_epoch, 'train')
 
     # multi gpu model upload
     if num_gpus > 1:
@@ -64,11 +64,7 @@ def train(rank):
     frame_size = past_size + present_size + future_size
     train_set = dataset.AudioDataset([train_orig_path, train_noisy_path], sampling_rate, frame_size, shift_size, input_window)
     train_sampler = DistributedSampler(train_set) if num_gpus > 1 else None
-    train_loader = DataLoader(train_set, num_workers=num_gpus*4, shuffle=True,
-                              sampler=train_sampler,
-                              batch_size=batch_per_gpu,
-                              pin_memory=True,
-                              drop_last=True)
+    train_loader = DataLoader(train_set, num_workers=num_gpus*4, shuffle=True, sampler=train_sampler, batch_size=batch_per_gpu, pin_memory=True, drop_last=True)
 
     # run
     wavenet.train()
@@ -90,65 +86,44 @@ def train(rank):
                 print(util.change_font_color('yellow', 'iter'), util.change_font_color('bright yellow', f"{i + 1}/{num_of_iteration}"), end=" ")
 
             orig, noisy = batch
-            x = torch.autograd.Variable(x.to(device, non_blocking=True))
-            y = torch.autograd.Variable(y.to(device, non_blocking=True))
-            y = y.unsqueeze(1)
-
-            y_g_hat = generator(x)
+            orig = orig.to(device, non_blocking=True)
+            noisy = noisy.to(device, non_blocking=True)
+            orig = orig.unsqueeze(1)
+            noisy = noisy.unsqueeze(1)
+            noise = noisy-orig
 
             optimizer.zero_grad()
 
+            orig_pred = wavenet(noisy)
+            noise_pred = noisy-orig_pred
+
             # L1 Mel-Spectrogram Loss
-            loss_mel = F.l1_loss(y_mel, y_g_hat_mel) * 45
+            loss = (loss_function.l1_loss(orig, orig_pred) + loss_function.l1_loss(noise, noise_pred)) / 2.0 / batch_size
 
-            y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(y, y_g_hat)
-            y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = msd(y, y_g_hat)
-            loss_fm_f = feature_loss(fmap_f_r, fmap_f_g)
-            loss_fm_s = feature_loss(fmap_s_r, fmap_s_g)
-            loss_gen_f, losses_gen_f = generator_loss(y_df_hat_g)
-            loss_gen_s, losses_gen_s = generator_loss(y_ds_hat_g)
-            loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + loss_mel
-
-            loss_gen_all.backward()
+            loss.backward()
             optimizer.step()
 
             if rank == 0:
-                # STDOUT logging
-                if steps % a.stdout_interval == 0:
-                    with torch.no_grad():
-                        mel_error = F.l1_loss(y_mel, y_g_hat_mel).item()
-
-                    print('Steps : {:d}, Gen Loss Total : {:4.3f}, Mel-Spec. Error : {:4.3f}, s/b : {:4.3f}'.
-                          format(steps, loss_gen_all, mel_error, time.time() - start_b))
-
-                # checkpointing
-                if steps % a.checkpoint_interval == 0 and steps != 0:
-                    checkpoint_path = "{}/g_{:08d}".format(a.checkpoint_path, steps)
-                    save_checkpoint(checkpoint_path,
-                                    {'generator': (generator.module if h.num_gpus > 1 else generator).state_dict()})
-                    checkpoint_path = "{}/do_{:08d}".format(a.checkpoint_path, steps)
-                    save_checkpoint(checkpoint_path,
-                                    {'mpd': (mpd.module if h.num_gpus > 1
-                                             else mpd).state_dict(),
-                                     'msd': (msd.module if h.num_gpus > 1
-                                             else msd).state_dict(),
-                                     'optim_g': optim_g.state_dict(), 'optim_d': optim_d.state_dict(), 'steps': steps,
-                                     'epoch': epoch})
-
-                # Tensorboard summary logging
-                if steps % a.summary_interval == 0:
-                    sw.add_scalar("training/gen_loss_total", loss_gen_all, steps)
-                    sw.add_scalar("training/mel_spec_error", mel_error, steps)
-
-
-            steps += 1
-
-        scheduler_g.step()
-        scheduler_d.step()
+                train_mae_loss += loss
 
         if rank == 0:
-            print('Time taken for epoch {} is {} sec\n'.format(epoch + 1, int(time.time() - start)))
+            # neptune log
+            train_mae_loss /= num_of_iteration
+            neptune.log('mae_loss', train_mae_loss, epoch)
 
+            # checkpoint save
+            if epoch % save_checkpoint_period == 0 or epoch == 1:
+                save_checkpoint_path = f"./checkpoint/{save_checkpoint_name}_{epoch}.pth"
+                os.makedirs(save_checkpoint_path, exist_ok=True)
+                checkpoint = {'wavenet': wavenet.state_dict(), 'optimizer': optimizer.state_dict()}
+                torch.save(checkpoint, save_checkpoint_path)
+
+            end_time = util.second_to_dhms_string(time.time() - start)
+            print(util.change_font_color('bright black', '|'), end=" ")
+            print(util.change_font_color('bright red', 'Loss:'), util.change_font_color('bright yellow', f"{train_mae_loss:.4E}"), end=" ")
+            print(f"({end_time})")
+
+        scheduler.step()
 
 # train
 if num_gpus > 1:
@@ -156,3 +131,4 @@ if num_gpus > 1:
 else:
     train(0)
 
+neptune.stop()

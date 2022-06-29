@@ -1,15 +1,14 @@
-#####################################################################################
+##### LEARNING_PARAMETER ######################################################
 epochs                          = 10000
 batch_size                      = 128
 learning_rate                   = 0.0001
 learning_rate_decay             = 0.999
-#####################################################################################
+seed                            = 1234
+##### CHECKPOINT_SETTING ######################################################
 load_checkpoint_name            = ""
 save_checkpoint_name            = "WAVENET"
 save_checkpoint_period          = 10
-model_name                      = "WAVENET"
-seed                            = 1234
-#####################################################################################
+##### MODEL_PARAMETER #########################################################
 past_size                       = 1600
 present_size                    = 2200
 future_size                     = 1600
@@ -18,9 +17,13 @@ shift_size                      = 2200
 sampling_rate                   = 16000
 input_window                    = 'uniform'
 output_window                   = 'uniform'
-#####################################################################################
+##### DATASET_PATH ############################################################
 train_noisy_path                = "/home/ubuntu/DATASET/AEC_SYNTH"
 train_orig_path                 = "/home/ubuntu/DATASET/AEC_SYNTH"
 test_noisy_path                 = "/home/ubuntu/DATASET/AEC_SYNTH"
 test_orig_path                  = "/home/ubuntu/DATASET/AEC_SYNTH"
-#####################################################################################
+##### NEPTUNE_SETTING #########################################################
+project_name                    = 'csp-lab/AEC'
+model_name                      = "WAVENET"
+api_key_name                    = 'yjc'
+backup_file_list                = ['train.py', 'model.py', 'config.py', 'loss_function.py']
