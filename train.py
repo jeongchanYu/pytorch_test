@@ -93,6 +93,11 @@ def train(rank, params):
             orig_pred = wavenet(noisy)
             noise_pred = noisy-orig_pred
 
+            orig = orig[:, :, past_size:past_size+present_size]
+            noise = noise[:, :, past_size:past_size+present_size]
+            orig_pred = orig_pred[:, :, past_size:past_size+present_size]
+            noise_pred = noise_pred[:, :, past_size:past_size+present_size]
+
             loss = (l1_loss(orig, orig_pred) + l1_loss(noise, noise_pred)) / 2.0 / batch_size
 
             loss.backward()
