@@ -5,9 +5,9 @@ learning_rate                   = 0.0001
 learning_rate_decay             = 0.999
 seed                            = 1234
 ##### CHECKPOINT_SETTING #######################################################################
-load_checkpoint_name            = ""
+load_checkpoint_name            = "TORCH_TEST_5"
 save_checkpoint_name            = "TORCH_TEST"
-save_checkpoint_period          = 1
+save_checkpoint_period          = 10
 ##### MODEL_PARAMETER ##########################################################################
 past_size                       = 2200
 present_size                    = 1600

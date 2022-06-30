@@ -115,7 +115,7 @@ def train(rank, params):
             if epoch % save_checkpoint_period == 0 or epoch == 1:
                 save_checkpoint_path = f"./checkpoint/{save_checkpoint_name}_{epoch}.pth"
                 os.makedirs(os.path.dirname(save_checkpoint_path), exist_ok=True)
-                checkpoint = {'wavenet': wavenet.state_dict(), 'optimizer': optimizer.state_dict()}
+                checkpoint = {'wavenet': (wavenet.module if num_gpus > 1 else wavenet).state_dict(), 'optimizer': optimizer.state_dict()}
                 torch.save(checkpoint, save_checkpoint_path)
 
             end_time = util.second_to_dhms_string(time.time() - start)
