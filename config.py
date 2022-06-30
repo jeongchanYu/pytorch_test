@@ -1,6 +1,6 @@
 ##### LEARNING_PARAMETER #######################################################################
 epochs                          = 10000
-batch_size                      = 64
+batch_size                      = 32
 learning_rate                   = 0.0001
 learning_rate_decay             = 0.999
 seed                            = 1234
@@ -9,11 +9,11 @@ load_checkpoint_name            = ""
 save_checkpoint_name            = "TORCH_TEST"
 save_checkpoint_period          = 1
 ##### MODEL_PARAMETER ##########################################################################
-past_size                       = 1600
-present_size                    = 2200
-future_size                     = 1600
+past_size                       = 2200
+present_size                    = 1600
+future_size                     = 2200
 dilation                        = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
-shift_size                      = 2200
+shift_size                      = 1600
 sampling_rate                   = 16000
 input_window                    = 'uniform'
 output_window                   = 'uniform'
