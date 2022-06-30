@@ -28,6 +28,7 @@ def train(rank, params):
         device = torch.device('cuda:{:d}'.format(rank))
     else:
         device = torch.device('cpu')
+    torch.cuda.set_device(device)
 
     wavenet = model.Wavenet(dilation).to(device)
     optimizer = torch.optim.AdamW(wavenet.parameters(), learning_rate)
@@ -53,7 +54,7 @@ def train(rank, params):
 
     # multi gpu model upload
     if num_gpus > 1:
-        wavenet = DistributedDataParallel(wavenet, device_ids=[rank], output_device=rank)
+        wavenet = DistributedDataParallel(wavenet, device_ids=[rank])
 
     # dataloader
     frame_size = past_size + present_size + future_size
