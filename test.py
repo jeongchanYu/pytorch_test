@@ -102,7 +102,8 @@ def train(rank, params):
 
             loss.backward()
             optimizer.step()
-
+            if num_gpus > 1:
+                dist.all_reduce(loss)
             if rank == 0:
                 train_mae_loss += loss.item()
 
