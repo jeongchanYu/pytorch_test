@@ -2,6 +2,7 @@ import os
 import time
 import datetime
 import math
+import time
 import loss_function
 import neptune_function
 from api_key import *
@@ -30,6 +31,7 @@ def train(rank, params):
 
     wavenet = model.Wavenet(dilation).to(device)
     optimizer = torch.optim.AdamW(wavenet.parameters(), learning_rate)
+    l1_loss = loss_function.l1_loss()
 
     # load model
     if load_checkpoint_name != "":
@@ -51,7 +53,7 @@ def train(rank, params):
 
     # multi gpu model upload
     if num_gpus > 1:
-        wavenet = DistributedDataParallel(wavenet, device_ids=[rank]).to(device)
+        wavenet = DistributedDataParallel(wavenet, device_ids=[rank], output_device=rank)
 
     # dataloader
     frame_size = past_size + present_size + future_size
@@ -90,13 +92,13 @@ def train(rank, params):
             orig_pred = wavenet(noisy)
             noise_pred = noisy-orig_pred
 
-            loss = (loss_function.l1_loss(orig, orig_pred) + loss_function.l1_loss(noise, noise_pred)) / 2.0 / batch_size
+            loss = (l1_loss(orig, orig_pred) + l1_loss(noise, noise_pred)) / 2.0 / batch_size
 
             loss.backward()
             optimizer.step()
 
             if rank == 0:
-                train_mae_loss += loss
+                train_mae_loss += loss.item()
 
         if rank == 0:
             # neptune log
