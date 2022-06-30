@@ -1,6 +1,6 @@
 ##### LEARNING_PARAMETER #######################################################################
 epochs                          = 10000
-batch_size                      = 32
+batch_size                      = 64
 learning_rate                   = 0.0001
 learning_rate_decay             = 0.999
 seed                            = 1234
