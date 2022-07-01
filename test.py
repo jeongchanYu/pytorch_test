@@ -17,7 +17,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DistributedSampler, DataLoader
 
 
-def train(rank, params):
+def test(rank, params):
     num_gpus, batch_per_gpu = params
     if num_gpus > 1:
         dist.init_process_group(backend='nccl', init_method='tcp://127.0.0.1:54321', world_size=num_gpus, rank=rank)
@@ -31,7 +31,6 @@ def train(rank, params):
     torch.cuda.set_device(device)
 
     wavenet = model.Wavenet(dilation).to(device)
-    optimizer = torch.optim.AdamW(wavenet.parameters(), learning_rate)
     l1_loss = loss_function.l1_loss()
 
     # load model
@@ -40,17 +39,8 @@ def train(rank, params):
         load_checkpoint_path = os.path.join('./checkpoint', f"{load_checkpoint_name}.pth")
         checkpoint = torch.load(load_checkpoint_path, map_location=device)
         wavenet.load_state_dict(checkpoint['wavenet'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
     else:
-        saved_epoch = 0
-
-    if rank == 0:
-        # neptune loss init
-        neptune = neptune_function.Neptune(project_name=project_name, model_name=model_name, api_key=api_key[api_key_name], file_names=backup_file_list)
-        neptune.loss_init(['mae_loss'], saved_epoch, 'train')
-
-    # learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=learning_rate_decay, last_epoch=saved_epoch-1)
+        util.raise_error("Check load_checkpoint_name.")
 
     # multi gpu model upload
     if num_gpus > 1:
@@ -58,9 +48,9 @@ def train(rank, params):
 
     # dataloader
     frame_size = past_size + present_size + future_size
-    train_set = dataset.AudioDataset([train_orig_path, train_noisy_path], sampling_rate, frame_size, shift_size, input_window)
-    train_sampler = DistributedSampler(train_set) if num_gpus > 1 else None
-    train_loader = DataLoader(train_set, num_workers=num_gpus*4, shuffle=False if num_gpus > 1 else True, sampler=train_sampler, batch_size=batch_per_gpu, pin_memory=True, drop_last=True)
+    test_set = dataset.AudioDataset([test_orig_path, test_noisy_path], sampling_rate, frame_size, shift_size, input_window)
+    test_sampler = DistributedSampler(test_set, shuffle=False) if num_gpus > 1 else None
+    test_loader = DataLoader(test_set, num_workers=num_gpus*4, shuffle=False, sampler=test_sampler, batch_size=batch_per_gpu, pin_memory=True, drop_last=True)
 
     # run
     wavenet.train()
