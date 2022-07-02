@@ -46,77 +46,87 @@ def test(rank, params):
     if num_gpus > 1:
         wavenet = DistributedDataParallel(wavenet, device_ids=[rank])
 
-    # dataloader
-    frame_size = past_size + present_size + future_size
-    test_set = dataset.AudioDataset([test_orig_path, test_noisy_path], sampling_rate, frame_size, shift_size, input_window)
-    test_sampler = DistributedSampler(test_set, shuffle=False) if num_gpus > 1 else None
-    test_loader = DataLoader(test_set, num_workers=num_gpus*4, shuffle=False, sampler=test_sampler, batch_size=batch_per_gpu, pin_memory=True, drop_last=True)
+    # read file list
+    if not util.compare_path_list([test_orig_path, test_noisy_path], 'wav'):
+        util.raise_error('Audio file lists are not same')
+    test_orig_file_list = util.read_path_list(test_orig_path, 'wav')
+    test_noisy_file_list = util.read_path_list(test_noisy_path, 'wav')
+    num_of_files = len(test_orig_file_list)
+    for file_index, (test_orig_file, test_noisy_file) in enumerate(zip(test_orig_file_list, test_noisy_file_list)):
+        # dataloader
+        frame_size = past_size + present_size + future_size
+        test_set = dataset.AudioDataset([test_orig_file, test_noisy_file], sampling_rate, frame_size, shift_size, input_window)
+        test_sampler = DistributedSampler(test_set, shuffle=False) if num_gpus > 1 else None
+        test_loader = DataLoader(test_set, num_workers=num_gpus*4, shuffle=False, sampler=test_sampler, batch_size=batch_per_gpu, pin_memory=True, drop_last=False)
 
-    # run
-    wavenet.train()
-    for epoch in range(saved_epoch + 1, saved_epoch + epochs + 1):
+        # run
+        wavenet.eval()
         if rank == 0:
             start = time.time()
             now_time = datetime.datetime.now().strftime("%Y-%m-%d/%H:%M:%S")
-            num_of_iteration = math.ceil(train_set.number_of_frame/batch_size)
-            train_mae_loss = 0
+            num_of_iteration = math.ceil(test_set.number_of_frame/batch_size)
+            test_mae_loss = 0
 
-        if num_gpus > 1:
-            train_sampler.set_epoch(epoch)
+        with torch.no_grad():
+            output_orig = torch.zeros(test_set.total_length).to(device, non_blocking=True)
+            output_noise = torch.zeros(test_set.total_length).to(device, non_blocking=True)
+            window = torch.from_numpy(util.window(output_window, present_size)).to(device, non_blocking=True)
+            for i, batch in enumerate(test_loader):
+                if rank == 0:
+                    print(f"\r({now_time})", end=" ")
+                    print(util.change_font_color('bright cyan', 'Train:'), end=" ")
+                    print(util.change_font_color('yellow', 'epoch'), util.change_font_color('bright yellow', f"{file_index+1}/{num_of_files},"), end=" ")
+                    print(util.change_font_color('yellow', 'iter'), util.change_font_color('bright yellow', f"{i + 1}/{num_of_iteration}"), end=" ")
 
-        for i, batch in enumerate(train_loader):
-            if rank == 0:
-                print(f"\r({now_time})", end=" ")
-                print(util.change_font_color('bright cyan', 'Train:'), end=" ")
-                print(util.change_font_color('yellow', 'epoch'), util.change_font_color('bright yellow', f"{epoch}/{saved_epoch + epochs},"), end=" ")
-                print(util.change_font_color('yellow', 'iter'), util.change_font_color('bright yellow', f"{i + 1}/{num_of_iteration}"), end=" ")
+                index, orig, noisy = batch
+                orig = orig.to(device, non_blocking=True)
+                noisy = noisy.to(device, non_blocking=True)
+                orig = orig.unsqueeze(1)
+                noisy = noisy.unsqueeze(1)
+                noise = noisy-orig
 
-            index, orig, noisy = batch
-            orig = orig.to(device, non_blocking=True)
-            noisy = noisy.to(device, non_blocking=True)
-            orig = orig.unsqueeze(1)
-            noisy = noisy.unsqueeze(1)
-            noise = noisy-orig
+                orig_pred = wavenet(noisy)
+                noise_pred = noisy-orig_pred
 
-            optimizer.zero_grad()
+                orig = orig[:, :, past_size:past_size+present_size]
+                noise = noise[:, :, past_size:past_size+present_size]
+                orig_pred = orig_pred[:, :, past_size:past_size+present_size]
+                noise_pred = noise_pred[:, :, past_size:past_size+present_size]
 
-            orig_pred = wavenet(noisy)
-            noise_pred = noisy-orig_pred
+                loss = (l1_loss(orig, orig_pred) + l1_loss(noise, noise_pred)) / 2.0 / batch_size
 
-            orig = orig[:, :, past_size:past_size+present_size]
-            noise = noise[:, :, past_size:past_size+present_size]
-            orig_pred = orig_pred[:, :, past_size:past_size+present_size]
-            noise_pred = noise_pred[:, :, past_size:past_size+present_size]
+                for b in range(orig.shape[0]):
+                    idx = int(index[b])
+                    output_orig[shift_size*idx+past_size:shift_size*idx+past_size+present_size] = orig_pred[b, 0] * window
+                    output_noise[shift_size*idx+past_size:shift_size*idx+past_size+present_size] = noise_pred[b, 0] * window
 
-            loss = (l1_loss(orig, orig_pred) + l1_loss(noise, noise_pred)) / 2.0 / batch_size
+                if num_gpus > 1:
+                    dist.all_reduce(loss)
 
-            loss.backward()
-            optimizer.step()
+                if rank == 0:
+                    test_mae_loss += loss.item()
+
             if num_gpus > 1:
-                dist.all_reduce(loss)
+                dist.all_reduce(output_orig)
+                dist.all_reduce(output_noise)
+
             if rank == 0:
-                train_mae_loss += loss.item()
+                test_mae_loss /= num_of_iteration
 
-        if rank == 0:
-            # neptune log
-            train_mae_loss /= num_of_iteration
-            neptune.log('mae_loss', train_mae_loss, epoch)
+                output_orig = output_orig.cpu().numpy()
+                output_noise = output_noise.cpu().numpy()
+                save_orig_file_name = util.remove_base_path(test_orig_file, test_orig_path)
+                save_noise_file_name = util.remove_base_path(test_noisy_file, test_noisy_path)
+                save_orig_file_path = os.path.join('./test_result', load_checkpoint_name, 'orig', save_orig_file_name)
+                save_noise_file_path = os.path.join('./test_result', load_checkpoint_name, 'noise', save_noise_file_name)
+                util.write_audio_file(save_orig_file_path, output_orig[test_set.front_padding_size:len(output_orig) - test_set.rear_padding_size], sampling_rate)
+                util.write_audio_file(save_noise_file_path, output_noise[test_set.front_padding_size:len(output_noise) - test_set.rear_padding_size], sampling_rate)
 
-            # checkpoint save
-            if epoch % save_checkpoint_period == 0 or epoch == 1:
-                save_checkpoint_path = f"./checkpoint/{save_checkpoint_name}_{epoch}.pth"
-                os.makedirs(os.path.dirname(save_checkpoint_path), exist_ok=True)
-                checkpoint = {'wavenet': (wavenet.module if num_gpus > 1 else wavenet).state_dict(), 'optimizer': optimizer.state_dict()}
-                torch.save(checkpoint, save_checkpoint_path)
+                end_time = util.second_to_dhms_string(time.time() - start)
+                print(util.change_font_color('bright black', '|'), end=" ")
+                print(util.change_font_color('bright red', 'Loss:'), util.change_font_color('bright yellow', f"{test_mae_loss:.4E}"), end=" ")
+                print(f"({end_time})")
 
-            end_time = util.second_to_dhms_string(time.time() - start)
-            print(util.change_font_color('bright black', '|'), end=" ")
-            print(util.change_font_color('bright red', 'Loss:'), util.change_font_color('bright yellow', f"{train_mae_loss:.4E}"), end=" ")
-            print(f"({end_time})")
-
-        scheduler.step()
-
-    neptune.stop()
 
 
 if __name__ == '__main__':
@@ -132,6 +142,6 @@ if __name__ == '__main__':
 
     # run
     if num_gpus > 1:
-        mp.spawn(train, nprocs=num_gpus, args=([num_gpus, batch_per_gpu],))
+        mp.spawn(test, nprocs=num_gpus, args=([num_gpus, batch_per_gpu],))
     else:
-        train(0)
+        test(0)
