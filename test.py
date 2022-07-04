@@ -144,4 +144,4 @@ if __name__ == '__main__':
     if num_gpus > 1:
         mp.spawn(test, nprocs=num_gpus, args=([num_gpus, batch_per_gpu],))
     else:
-        test(0)
+        test(0, [0, batch_size])

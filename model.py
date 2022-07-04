@@ -16,6 +16,8 @@ class ResidualBlock(torch.nn.Module):
         if self.residual:
             self.conv_residual = Conv1d(channel, channel, 1, padding='same')
 
+        self.initialize_weights()
+
     def forward(self, x):
         gated = torch.sigmoid(self.conv_gated_sigmoid(x)) * torch.tanh(self.conv_gated_tanh(x))
         skip_out = self.conv_skip_out(gated)
@@ -47,6 +49,8 @@ class Wavenet(torch.nn.Module):
         self.conv_output1 = Conv1d(channel, 2048, 3, padding='same')
         self.conv_output2 = Conv1d(2048, 256, 3, padding='same')
         self.conv_output3 = Conv1d(256, 1, 1, padding='same')
+
+        self.initialize_weights()
 
     def forward(self, x):
         x = self.conv_input(x)
